@@ -1,4 +1,47 @@
-# SkyTrade
+# SkyTrade Smallcap
+
+Forked from the main SkyTrade/p-trade project on 2026-08-14, scoped to the
+**Nifty Smallcap 250** universe on **weekly** signals instead of the parent
+project's hourly signals over its ~220-symbol large/midcap universe.
+
+**Why weekly, why smallcap:** hourly-cadence trading doesn't suit smallcaps
+well (wider spreads, lower liquidity, more noise) -- 2026-08-14 research
+resampled the parent's engine onto weekly bars and found win rate/profit
+factor held up (56-60%, PF 3.5-3.8) while cutting trade frequency ~90x,
+which matters more here than it did for the parent's universe. See
+`infrastructure/weekly_resample.py`'s docstring for the mechanism (Kite has
+no native weekly interval, so this resamples real day-interval Kite data
+client-side) and git history for the full research.
+
+**What's different from the parent project** (everything else -- the
+Lorentzian classifier in `alpha_engine.py`, ranking, cost model, paper
+trading mechanics -- is unchanged, reused as-is):
+- `config/nifty_smallcap250_symbols.txt` (250 symbols) instead of
+  `config/symbols.txt` -- same Kite account, no separate app registration
+  needed.
+- `TRADING_SCANNER_CANDLE_INTERVAL=week` (bridged client-side, see above)
+  instead of `1h`.
+- **No stop-loss.** Weekly losers average -6.25%, well past any tick-level
+  threshold that would make sense intraday -- positions exit on the
+  engine's own signal only. `live_pipeline.py` (the WebSocket
+  live-ticker/stop-loss service) is **not part of this fork's deployment**
+  -- weekly signals only need a once-daily check, not a continuously
+  connected session. `deploy/p-trade-live.service` is left in the repo
+  unused/for reference only; do not enable it here.
+- Small pilot capital: Rs 1.5L / 10 slots (`TRADING_SCANNER_PAPER_CAPITAL`
+  / `_PAPER_SLOTS`), separate pool from the parent project's live account.
+- Deployment is a **daily crontab entry** running
+  `trading_scanner.signals` once after market close (matching the parent's
+  actual production method -- see `.github/workflows/hourly-signals.yml`'s
+  own comment: scheduling is real crontab on the VPS, not GitHub Actions or
+  systemd), not the hourly cadence or the WebSocket service.
+- ~55 of the 250 symbols are recent listings with <200 weekly bars
+  (~4 years) of history -- `_MINIMUM_CANDLES` in both `backtest.py` and
+  `application/signal_pipeline.py` requires that much warm-up before a
+  symbol signals at all, same rule as the parent project reused unchanged.
+  They'll simply stay dormant until they individually cross that bar.
+
+---
 
 An NSE market signal scanner built around a Pine Script-derived technical
 strategy, with an hourly ingestion pipeline and a simulated (paper) trading

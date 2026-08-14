@@ -56,12 +56,18 @@ from trading_scanner.infrastructure.kite import (
     KiteProvider,
 )
 from trading_scanner.infrastructure.telegram import LoggingNotifier
+from trading_scanner.infrastructure.weekly_resample import (
+    WEEKLY_INTERVAL,
+    WeeklyResamplingProvider,
+)
 from trading_scanner.infrastructure.yahoo import YahooProvider
 
 # Both providers implement the same duck-typed get_recent_history(symbol,
 # interval, days) -> pd.DataFrame interface; nothing below needs to know
-# which one it got.
-MarketDataProvider = YahooProvider | KiteProvider
+# which one it got. WeeklyResamplingProvider wraps whichever real provider
+# _select_provider returns (see run_signal_pipeline) -- it's how this
+# smallcap fork gets a "week" interval Kite has no native support for.
+MarketDataProvider = YahooProvider | KiteProvider | WeeklyResamplingProvider
 
 # AlphaEngine's regime filter needs ~200 bars of warm-up before predictions are
 # meaningful; below this the pipeline skips a symbol instead of notifying on
@@ -180,6 +186,15 @@ async def run_signal_pipeline(
                 "No valid Kite session -- skipping this run entirely (no Yahoo fallback)."
             )
             return
+        if config.candle_interval == WEEKLY_INTERVAL:
+            # This fork trades weekly signals only -- Kite has no native
+            # weekly interval, so every candle fetch for the rest of this
+            # run is transparently resampled from real day-interval Kite
+            # data (infrastructure/weekly_resample.py). The Kite session
+            # validation above already ran against the real provider, so
+            # this wrap can't mask a stale/missing session.
+            provider = WeeklyResamplingProvider(provider)
+            provider_name = f"{provider_name} (resampled to weekly)"
     logger.info("Using %s as the market data source for this run.", provider_name)
     engine = AlphaEngine(**_ENGINE_SETTINGS)
     derivatives_chain = KiteDerivativesChain(kite) if kite is not None else None
