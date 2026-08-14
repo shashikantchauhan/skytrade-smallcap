@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "skytrade"
+name = "skytrade-smallcap"
 version = "0.1.0"
 description = "SkyTrade: an NSE F&O trading-signal scanner and paper-trading engine."
 authors = ["Shashikant Chauhan <hardrock.chauhan@gmail.com>"]

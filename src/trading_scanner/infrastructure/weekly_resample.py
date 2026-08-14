@@ -1,6 +1,6 @@
 """Bridges Kite Connect's missing native weekly interval for this fork.
 
-p-trade-smallcap runs entirely on weekly signals (see 2026-08-14 research:
+skytrade-smallcap runs entirely on weekly signals (see 2026-08-14 research:
 weekly-resampled signals on the Nifty Smallcap 250 held up comparably to
 the parent project's hourly system -- 56-60% win rate, PF 3.5-3.8 -- while
 cutting trade frequency ~90x, which matters a lot more for smallcaps'
