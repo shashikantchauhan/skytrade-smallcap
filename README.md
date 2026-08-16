@@ -28,7 +28,7 @@ trading mechanics -- is unchanged, reused as-is):
   -- weekly signals only need a once-daily check, not a continuously
   connected session. `deploy/p-trade-live.service` is left in the repo
   unused/for reference only; do not enable it here.
-- Small pilot capital: Rs 1.5L / 10 slots (`TRADING_SCANNER_PAPER_CAPITAL`
+- Capital: Rs 5L / 10 slots, Rs 50k each (`TRADING_SCANNER_PAPER_CAPITAL`
   / `_PAPER_SLOTS`), separate pool from the parent project's live account.
 - Deployment is a **daily crontab entry** running
   `trading_scanner.signals` once after market close (matching the parent's
