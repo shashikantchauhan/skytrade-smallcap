@@ -69,7 +69,8 @@ class TursoPaperAccountRepository:
         await self._client.execute(
             """
             INSERT INTO paper_positions
-                (symbol, entry_timestamp, entry_price, quantity, capital_allocated, status, peak_price)
+                (symbol, entry_timestamp, entry_price, quantity, capital_allocated, status,
+                 peak_price)
             VALUES (?, ?, ?, ?, ?, 'open', ?)
             """,
             [

@@ -102,7 +102,9 @@ def stop_loss_price(entry_price: Decimal) -> Decimal:
 # baseline; activate=15%/trail=3% chosen as a solidly-supported middle of
 # that range rather than the single best (most extreme) grid cell, to
 # avoid overfitting a coarse grid search to one dataset snapshot.
-TRAILING_STOP_ACTIVATION_PCT = Decimal(os.getenv("TRADING_SCANNER_TRAILING_STOP_ACTIVATION_PCT", "15"))
+TRAILING_STOP_ACTIVATION_PCT = Decimal(
+    os.getenv("TRADING_SCANNER_TRAILING_STOP_ACTIVATION_PCT", "15")
+)
 TRAILING_STOP_TRAIL_PCT = Decimal(os.getenv("TRADING_SCANNER_TRAILING_STOP_TRAIL_PCT", "3"))
 
 

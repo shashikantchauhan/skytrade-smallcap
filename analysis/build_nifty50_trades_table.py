@@ -92,7 +92,10 @@ def build(db_path: Path) -> None:
     con.close()
 
     print(f"nifty50_trades built from {db_path}")
-    print(f"  {row_count} rows copied, {symbols_with_data}/{len(symbols)} symbols have trade history")
+    print(
+        f"  {row_count} rows copied, "
+        f"{symbols_with_data}/{len(symbols)} symbols have trade history"
+    )
     if missing:
         print(f"  No trade history yet for: {missing}")
 

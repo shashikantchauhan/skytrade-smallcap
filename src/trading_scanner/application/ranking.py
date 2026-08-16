@@ -98,9 +98,9 @@ class RankedCandidate:
 # splitting the history in half to catch anything that was only true in
 # aggregate). Results:
 #
-#   indicator            weak-bucket win% -> strong-bucket win%   stable across both halves?
-#   volatility_margin      51.8%     ->     62.9%                  yes (holds in older AND newer half)
-#   regime_normalized      54.9%     ->     61.9%                  partially (weak/not-significant in newer half)
+#   indicator            weak-bucket win% -> strong-bucket win%   stable across halves?
+#   volatility_margin      51.8%     ->     62.9%                  yes (both halves)
+#   regime_normalized      54.9%     ->     61.9%                  partial (weak, newer half)
 #   adx                    56.4%     ->     60.2%  (non-monotonic) no -- noise
 #   prediction_at_entry    54.6%     ->     60.4%  (non-monotonic) no -- noise
 #
@@ -124,12 +124,16 @@ class RankedCandidate:
 # trades' real distributions -- so a new candidate's raw value gets scored
 # by where it falls in the *historical* distribution, not an arbitrary
 # fixed scale.
-_VOLATILITY_MARGIN_DECILE_CUTS = [0.3966, 0.9614, 1.8114, 3.0316, 4.8878, 8.0392, 14.1294, 25.6973, 57.273]
-_REGIME_NORMALIZED_DECILE_CUTS = [0.0667, 0.2351, 0.4403, 0.6821, 0.9504, 1.3043, 1.7584, 2.4345, 3.7582]
+_VOLATILITY_MARGIN_DECILE_CUTS = [
+    0.3966, 0.9614, 1.8114, 3.0316, 4.8878, 8.0392, 14.1294, 25.6973, 57.273,
+]
+_REGIME_NORMALIZED_DECILE_CUTS = [
+    0.0667, 0.2351, 0.4403, 0.6821, 0.9504, 1.3043, 1.7584, 2.4345, 3.7582,
+]
 _VOLATILITY_MARGIN_WEIGHT = 1.0  # strongest, stable evidence -- full weight
 _REGIME_NORMALIZED_WEIGHT = 0.5  # real but less stable -- half weight
-_PREDICTION_MAGNITUDE_WEIGHT = 2.0  # no quality signal found -- kept small, mostly for direction (see below)
-_ADX_WEIGHT = 1.0  # no quality signal found -- raw value is already small (~0.07-0.65), stays a minor nudge
+_PREDICTION_MAGNITUDE_WEIGHT = 2.0  # no quality signal -- kept small, mostly for direction
+_ADX_WEIGHT = 1.0  # no quality signal -- raw value already small (~0.07-0.65), minor nudge
 
 # 2026-08-14: unlike the four factors above (validated only as "beats
 # random on this one dataset," see the caveat above score_candidate),
