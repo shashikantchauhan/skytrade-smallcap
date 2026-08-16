@@ -20,20 +20,26 @@ jobs:
       - run: poetry run pytest
 
   deploy:
-    # Only after test passes, and only for a real push to main (never for a
-    # pull_request event, and never for a push to any other branch) -- this
-    # is what turns a merge (including from the GitHub mobile app) into the
-    # entire deploy process: no SSH/server access needed for routine changes.
-    # See deploy/p-trade-live.service and this repo's history for why the
-    # VPS, not GitHub Actions itself, runs the live pipeline (a stable
-    # outbound IP SEBI requires for order placement, and a real crontab
-    # instead of GitHub's unreliable schedule trigger -- see
-    # hourly-signals.yml's own docstring).
+    # 2026-08-14: adapted from the parent p-trade repo's deploy job for this
+    # fork's different architecture -- there is no long-running service to
+    # restart here (no live_pipeline.py/p-trade-live in this fork, see
+    # README's "What's different" section), just a daily crontab entry that
+    # re-runs trading_scanner.signals against whatever code is checked out.
+    # So "deploy" here is only a git pull -- the next scheduled cron run
+    # picks up new code automatically, nothing to restart.
+    #
+    # Inert until this repo has its own DEPLOY_HOST/DEPLOY_USER/
+    # DEPLOY_SSH_KEY secrets set (deliberately not configured yet -- ssh
+    # access to the VPS is real production access, not something to wire up
+    # silently as a side effect of a rename/fork). Until then this step
+    # fails harmlessly (empty secrets -> ssh-action can't connect) rather
+    # than doing nothing silently, so it's obvious it needs setup rather
+    # than looking like it's working.
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - name: Pull latest code and restart services on the VPS
+      - name: Pull latest code on the VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -41,13 +47,5 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             set -e
-            cd /opt/p-trade
-            # Mirrors the documented manual process exactly (README/deploy/
-            # p-trade-live.service): git pull, then restart. No dependency
-            # reinstall step -- the manual process never had one either
-            # (the VPS's .venv is not poetry-managed in place; a PR adding a
-            # new dependency still needs a one-off manual venv update, same
-            # as it always has).
+            cd /opt/skytrade-smallcap
             git pull origin main --ff-only
-            systemctl restart p-trade-live
-            systemctl restart p-trade-dashboard
