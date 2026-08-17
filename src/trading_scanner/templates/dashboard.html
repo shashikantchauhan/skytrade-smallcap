@@ -170,6 +170,9 @@
   <h2>Nifty50 futures paper account <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(real, capital-gated -- 55% own-side win rate + live Kite margin check, separate book from cash)</span></h2>
   <div class="cards" id="futures-paper-cards"></div>
 
+  <h2 style="margin-top: 1.5rem;">Last 30 days <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(track this before deciding whether to fund it for real trading)</span></h2>
+  <div class="cards" id="futures-paper-monthly-cards"></div>
+
   <h2 style="margin-top: 1.5rem;">Open combos</h2>
   <div class="panel table-wrap">
     <table id="futures-paper-open-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Lot size</th><th>Margin allocated</th><th>Current price</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
@@ -346,6 +349,17 @@ async function loadFuturesPaper() {
     <div class="card"><div class="label">Cash balance (margin pool)</div><div class="value">₹${fmt(f.cash_balance)}</div></div>
     <div class="card"><div class="label">Total equity (at cost)</div><div class="value">₹${fmt(f.total_equity)}</div></div>
     <div class="card"><div class="label">Open combos</div><div class="value">${f.open_positions.length}</div></div>
+  `;
+  const m = f.monthly_summary;
+  const mPnlClass = pnlClass(m.total_pnl);
+  const winRateCell = m.win_rate_pct === null ? "-" : `${fmt(m.win_rate_pct)}% (${m.wins}W / ${m.losses}L)`;
+  document.getElementById("futures-paper-monthly-cards").innerHTML = `
+    <div class="card"><div class="label">Trades opened</div><div class="value">${m.trades_opened}</div></div>
+    <div class="card"><div class="label">Trades closed</div><div class="value">${m.trades_closed}</div></div>
+    <div class="card"><div class="label">Still open (within window)</div><div class="value">${m.trades_still_open}</div></div>
+    <div class="card"><div class="label">Win rate</div><div class="value">${winRateCell}</div></div>
+    <div class="card"><div class="label">Total P&amp;L (closed)</div><div class="value ${mPnlClass}">₹${fmt(m.total_pnl)}</div></div>
+    <div class="card"><div class="label">Avg margin/trade</div><div class="value">${m.avg_margin_per_trade === null ? "-" : "₹" + fmt(m.avg_margin_per_trade)}</div></div>
   `;
   document.querySelector("#futures-paper-open-table tbody").innerHTML = f.open_positions.map(p => {
     const known = p.unrealized_pnl !== null && p.unrealized_pnl !== undefined;

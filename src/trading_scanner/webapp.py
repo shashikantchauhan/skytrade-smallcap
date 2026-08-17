@@ -19,6 +19,7 @@ import secrets
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -435,6 +436,64 @@ def _futures_unrealized_pnl(position, last_prices: dict[str, float]) -> dict:
     }
 
 
+def _futures_monthly_summary(open_positions: list, closed_positions: list, window_days: int = 30) -> dict:
+    """Trailing-window (default 30 days) performance summary for the
+    futures paper account -- opened/closed counts, win rate, total P&L,
+    average margin per trade.
+
+    2026-08-17: built at the user's explicit request to track a full
+    month of real paper performance before deciding whether to fund this
+    for real trading next month -- the dashboard only ever showed
+    "right now" state (open positions, last 50 closed) with no rollup a
+    non-technical read could use to decide "was this month good enough."
+
+    ``trades_opened`` counts by entry_timestamp (still-open or already
+    closed, whichever) so a trade that opens AND closes inside the window
+    counts once, not twice. ``trades_closed``/win rate/P&L are scoped by
+    exit_timestamp instead, since that's when a trade's outcome is
+    actually known -- a trade opened just before the window and closed
+    inside it counts toward the outcome stats even though its own entry
+    falls outside ``trades_opened``'s count, which is intentional: it's
+    real P&L realized inside this window either way.
+    """
+    window_start = datetime.now(UTC) - timedelta(days=window_days)
+
+    def _aware(ts: datetime) -> datetime:
+        return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+
+    opened = [
+        p
+        for p in (list(open_positions) + list(closed_positions))
+        if _aware(p.entry_timestamp) >= window_start
+    ]
+    closed_in_window = [
+        p
+        for p in closed_positions
+        if p.exit_timestamp is not None and _aware(p.exit_timestamp) >= window_start
+    ]
+    wins = [p for p in closed_in_window if p.pnl_amount is not None and p.pnl_amount > 0]
+    total_pnl = sum(
+        (p.pnl_amount for p in closed_in_window if p.pnl_amount is not None), start=Decimal("0")
+    )
+    total_margin_opened = sum((p.margin_allocated for p in opened), start=Decimal("0"))
+    return {
+        "window_days": window_days,
+        "window_start": window_start.isoformat(),
+        "trades_opened": len(opened),
+        "trades_closed": len(closed_in_window),
+        "trades_still_open": sum(1 for p in opened if p.status == "open"),
+        "wins": len(wins),
+        "losses": len(closed_in_window) - len(wins),
+        "win_rate_pct": (
+            _decimal(Decimal(100 * len(wins)) / len(closed_in_window)) if closed_in_window else None
+        ),
+        "total_pnl": _decimal(total_pnl),
+        "avg_margin_per_trade": (
+            _decimal(total_margin_opened / len(opened)) if opened else None
+        ),
+    }
+
+
 @app.get("/api/futures-paper")
 async def futures_paper(_: None = Depends(_require_session)) -> JSONResponse:
     """The real, capital-gated Nifty50 futures paper account (see
@@ -449,7 +508,11 @@ async def futures_paper(_: None = Depends(_require_session)) -> JSONResponse:
         await repository.ensure_schema()
         cash_balance = await repository.get_cash_balance()
         open_positions = list(await repository.get_open_positions())
-        recent_closed = list(await repository.get_recent_closed_positions(50))
+        # 500, not 50 -- large enough to cover several months at current
+        # real trade volume (see _futures_monthly_summary, which needs
+        # every closed trade inside the trailing window, not just the
+        # most recent handful the plain "recent closed" list below shows).
+        recent_closed = list(await repository.get_recent_closed_positions(500))
         last_prices = await _futures_last_prices(open_positions, client, config)
         total_margin_allocated = sum(
             (p.margin_allocated for p in open_positions), start=Decimal("0")
@@ -458,6 +521,7 @@ async def futures_paper(_: None = Depends(_require_session)) -> JSONResponse:
             {
                 "cash_balance": _decimal(cash_balance),
                 "total_equity": _decimal(cash_balance + total_margin_allocated),
+                "monthly_summary": _futures_monthly_summary(open_positions, recent_closed),
                 "open_positions": [
                     {
                         "symbol": p.symbol,
@@ -483,7 +547,10 @@ async def futures_paper(_: None = Depends(_require_session)) -> JSONResponse:
                         "margin_allocated": _decimal(p.margin_allocated),
                         "pnl_amount": _decimal(p.pnl_amount),
                     }
-                    for p in recent_closed
+                    # Display list stays capped at 50 like before -- the
+                    # full 500-row fetch above is only for the monthly
+                    # summary's window math, not meant to render as a table.
+                    for p in recent_closed[:50]
                 ],
             }
         )
