@@ -19,13 +19,19 @@ class TelegramNotifier:
     ``Signal.category`` for what drives the header choice.
     """
 
-    def __init__(self, bot_token: str, chat_id: str) -> None:
+    def __init__(self, bot_token: str, chat_id: str, label: str = "") -> None:
         """``chat_id``: one Telegram chat ID, or several comma-separated
         (e.g. "1152740946,8834658819") to fan the same message out to
         multiple people -- each person only needs to message the bot once,
-        ever, to get a chat ID; after that they're just another entry here."""
+        ever, to get a chat ID; after that they're just another entry here.
+
+        ``label``: shown in every message header (e.g. "Nifty50",
+        "Smallcap") -- needed because more than one deployment can share
+        the same bot/chat ID (see skytrade-smallcap's .env), and without
+        it a message gives no clue which system it came from."""
         self._url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         self._chat_ids = [c.strip() for c in chat_id.split(",") if c.strip()]
+        self._label = label
 
     async def send_signal(self, signal: Signal) -> None:
         message = _format_signal(signal)
@@ -38,10 +44,20 @@ class TelegramNotifier:
         bold/italic without hand-escaping every message; plain text still
         renders fine under HTML mode as long as it has no bare ``<``/``&``.
 
+        A ``label`` (e.g. "Nifty50", "Smallcap") is prepended as its own
+        first line whenever one is configured -- centralized here, not in
+        each message formatter, so every message type (signals, system
+        alerts, live-order alerts) is tagged the same way with no per-call-
+        site changes needed. Matters because more than one deployment can
+        share the same bot/chat ID (see skytrade-smallcap's .env) and,
+        without this, a message gives no clue which system sent it.
+
         Sent to every configured chat ID independently -- one recipient's
         failure (e.g. they blocked the bot) is logged but never blocks
         delivery to the others.
         """
+        if self._label:
+            message = f"<i>[{_escape(self._label)}]</i>\n{message}"
         async with httpx.AsyncClient(timeout=10.0) as client:
             for chat_id in self._chat_ids:
                 try:
@@ -63,13 +79,31 @@ def _format_signal(signal: Signal) -> str:
     return _format_entry(signal, parts)
 
 
+# A real futures-paper position opening/closing commits real margin capital
+# -- see application/futures_trading.py's open_futures_paper_position,
+# which is a wholly different thing from the always-on, uncapped
+# derivatives *shadow* tracking (futures-shadow(.../options-shadow(...),
+# analysis only, never a real order). 2026-08-17: both used to render as
+# identical plain bullets under a SELL header that says "info only, not
+# tradeable" -- true for the cash leg, but actively misleading when a real
+# futures short had just opened in the very same message. Split out so a
+# real futures fill is never mistaken for shadow-only noise.
+def _split_futures_paper(parts: list[str]) -> tuple[str | None, list[str]]:
+    futures_paper = next((p for p in parts if p.startswith("futures-paper:")), None)
+    rest = [p for p in parts if not p.startswith("futures-paper:")]
+    return futures_paper, rest
+
+
 def _format_entry(signal: Signal, parts: list[str]) -> str:
     is_buy = signal.side == SignalSide.BUY
+    futures_paper, parts = _split_futures_paper(parts)
     is_actionable = is_buy and any(p.startswith("paper: opened") for p in parts)
     if is_buy and is_actionable:
         header = "🟢 <b>BUY SIGNAL</b> -- paper trade opened"
     elif is_buy:
         header = "🟡 <b>BUY SIGNAL</b> <i>(watch only, no paper trade)</i>"
+    elif futures_paper:
+        header = "🔵 <b>SELL SIGNAL</b> <i>(cash: info only -- but see real futures below)</i>"
     else:
         header = "🔵 <b>SELL SIGNAL</b> <i>(info only -- not tradeable in cash market)</i>"
     lines = [
@@ -80,6 +114,8 @@ def _format_entry(signal: Signal, parts: list[str]) -> str:
         if part.startswith("prediction="):
             continue  # internal engine detail, not useful in a Telegram message
         lines.append(f"• {_escape(part)}")
+    if futures_paper:
+        lines.append(f"📊 <b>REAL FUTURES POSITION</b>: {_escape(futures_paper)}")
     return "\n".join(lines)
 
 

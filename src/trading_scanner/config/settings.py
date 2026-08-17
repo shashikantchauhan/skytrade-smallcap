@@ -39,6 +39,14 @@ class AppConfig:
     # trades on this book, same no-wildcard-default philosophy as
     # live_trading_symbols above.
     futures_paper_symbols_file: Path
+    # 2026-08-17: distinguishes which deployment a Telegram message came
+    # from -- e.g. this repo's own p-trade vs. the skytrade-smallcap fork,
+    # which reuses the exact same bot/chat ID. Shown in every message
+    # header (see infrastructure/telegram.py's _format_signal). Defaulted
+    # here (unlike every other field above) so existing AppConfig(...)
+    # call sites -- test fixtures mostly -- don't all need updating just
+    # for this; load_config() below still sets it explicitly from env.
+    notification_label: str = "Nifty50"
 
 
 def load_config() -> AppConfig:
@@ -54,6 +62,7 @@ def load_config() -> AppConfig:
         turso_auth_token=os.getenv("TRADING_SCANNER_TURSO_AUTH_TOKEN"),
         telegram_bot_token=os.getenv("TRADING_SCANNER_TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=os.getenv("TRADING_SCANNER_TELEGRAM_CHAT_ID"),
+        notification_label=os.getenv("TRADING_SCANNER_NOTIFICATION_LABEL", "Nifty50"),
         # NIFTY 50 -- broad NSE benchmark, not tied to any single sector.
         # Evaluated once per run and shown alongside every stock signal so you
         # can judge whether a signal lines up with the broader market or looks

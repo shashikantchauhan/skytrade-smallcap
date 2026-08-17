@@ -25,7 +25,9 @@ from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNot
 def _build_notifier(config: AppConfig):
     """Use Telegram when configured; otherwise fall back to console logging."""
     if config.telegram_bot_token and config.telegram_chat_id:
-        return TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
+        return TelegramNotifier(
+            config.telegram_bot_token, config.telegram_chat_id, config.notification_label
+        )
     return LoggingNotifier()
 
 
