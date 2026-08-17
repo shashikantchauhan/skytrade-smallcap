@@ -683,8 +683,8 @@ async def _process_symbol(
             config, order_executor, live_order_repository, notifier,
         )
         await _close_futures_paper(
-            symbol, newest_candle.timestamp, derivatives_chain,
-            futures_account_repository, futures_paper_symbols,
+            symbol, SignalSide.BUY, newest_candle.timestamp, market_price, derivatives_chain,
+            futures_account_repository, futures_paper_symbols, signal_repository, notifier,
         )
     if result.signal == "SELL":
         await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.BUY)
@@ -738,8 +738,8 @@ async def _process_symbol(
             config, order_executor, live_order_repository, notifier,
         )
         await _close_futures_paper(
-            symbol, newest_candle.timestamp, derivatives_chain,
-            futures_account_repository, futures_paper_symbols,
+            symbol, SignalSide.SELL, newest_candle.timestamp, market_price, derivatives_chain,
+            futures_account_repository, futures_paper_symbols, signal_repository, notifier,
         )
 
     if result.signal not in ("BUY", "SELL"):
@@ -1278,15 +1278,29 @@ async def _open_futures_paper(
 
 async def _close_futures_paper(
     symbol: str,
+    side: SignalSide,
     exit_timestamp: datetime,
+    market_price: Decimal,
     derivatives_chain: KiteDerivativesChain | None,
     futures_account_repository: FuturesPaperAccountRepository | None,
     futures_paper_symbols: frozenset[str],
+    signal_repository: SignalRepository,
+    notifier: Notifier,
 ) -> str | None:
     """Best-effort close of whatever ``_open_futures_paper`` opened -- see
     that function's docstring. Exit price is resolved internally from the
     real futures contract's live LTP, not the equity price -- see
-    ``close_futures_paper_position``'s docstring."""
+    ``close_futures_paper_position``'s docstring.
+
+    2026-08-17: this used to return the note but nothing ever sent it
+    anywhere -- both call sites discarded the return value, so a real
+    futures position closing (with real P&L) never reached Telegram at
+    all, only the server's own log. Now sends its own message here,
+    mirroring ``_close_paper_position``'s pattern exactly (own strategy
+    tag so the fingerprint can't collide with the entry signal at the same
+    symbol/side/timestamp). Inert in this fork (no futures allowlist
+    overlap with the smallcap universe), kept in sync with the parent
+    anyway."""
     if (
         futures_account_repository is None
         or derivatives_chain is None
@@ -1297,8 +1311,21 @@ async def _close_futures_paper(
         note = await futures_trading.close_futures_paper_position(
             symbol, exit_timestamp, derivatives_chain, futures_account_repository,
         )
-        if note is not None:
-            logging.getLogger(__name__).info(note)
+        if note is None:
+            return None
+        logging.getLogger(__name__).info(note)
+        signal = Signal(
+            symbol=symbol,
+            side=side,
+            strategy=f"{_STRATEGY_NAME}-futures-exit",
+            timestamp=exit_timestamp,
+            price=market_price,
+            rationale=note,
+            category="futures_exit",
+        )
+        if not await signal_repository.contains(signal.fingerprint):
+            await notifier.send_signal(signal)
+            await signal_repository.record(signal.fingerprint, signal.timestamp)
         return note
     except Exception:
         logging.getLogger(__name__).warning(

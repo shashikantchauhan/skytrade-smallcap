@@ -264,7 +264,8 @@ async def close_futures_paper_position(
     )
     if position is None:
         return None
+    pnl_percent = position.pnl_amount / position.margin_allocated * 100
     return (
         f"futures-paper: closed {position.side} {position.futures_tradingsymbol} "
-        f"pnl=₹{position.pnl_amount:.0f}"
+        f"pnl=₹{position.pnl_amount:.0f} ({pnl_percent:.2f}%)"
     )

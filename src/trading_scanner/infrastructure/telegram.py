@@ -35,29 +35,38 @@ class TelegramNotifier:
 
     async def send_signal(self, signal: Signal) -> None:
         message = _format_signal(signal)
-        await self.send_text(message)
+        await self.send_text(message, label=_message_label_override(signal) or self._label)
 
-    async def send_text(self, message: str) -> None:
+    async def send_text(self, message: str, label: str | None = None) -> None:
         """Free-form notification, e.g. the Kite-session-expired alert (see
         ``application/signal_pipeline.py``'s ``_select_provider``) -- not
         every notification is a trade signal. HTML parse mode so callers can
         bold/italic without hand-escaping every message; plain text still
         renders fine under HTML mode as long as it has no bare ``<``/``&``.
 
-        A ``label`` (e.g. "Nifty50", "Smallcap") is prepended as its own
-        first line whenever one is configured -- centralized here, not in
-        each message formatter, so every message type (signals, system
-        alerts, live-order alerts) is tagged the same way with no per-call-
-        site changes needed. Matters because more than one deployment can
-        share the same bot/chat ID (see skytrade-smallcap's .env) and,
-        without this, a message gives no clue which system sent it.
+        A label (e.g. "Cash", "Smallcap") is prepended as its own first
+        line whenever one is set -- ``label`` if given, else this
+        instance's own deployment-wide default (``self._label``).
+        Centralized here, not in each message formatter, so every message
+        type is tagged consistently with minimal per-call-site changes.
+        Matters because more than one deployment can share the same bot/
+        chat ID (see skytrade-smallcap's .env) and, without this, a
+        message gives no clue which system sent it.
+
+        2026-08-17: ``send_signal`` overrides the deployment default with
+        "Futures" for a real futures-paper fill -- that's real margin
+        capital committed on Nifty50-allowlisted symbols specifically, a
+        genuinely different thing from this deployment's own cash-side
+        activity, and tagging it with the deployment's default label
+        (e.g. "Cash") would be actively wrong for that one message.
 
         Sent to every configured chat ID independently -- one recipient's
         failure (e.g. they blocked the bot) is logged but never blocks
         delivery to the others.
         """
-        if self._label:
-            message = f"<i>[{_escape(self._label)}]</i>\n{message}"
+        label = label if label is not None else self._label
+        if label:
+            message = f"<i>[{_escape(label)}]</i>\n{message}"
         async with httpx.AsyncClient(timeout=10.0) as client:
             for chat_id in self._chat_ids:
                 try:
@@ -70,10 +79,25 @@ class TelegramNotifier:
                     logger.warning("Telegram send failed for chat_id=%s", chat_id, exc_info=True)
 
 
+def _message_label_override(signal: Signal) -> str | None:
+    """"Futures" whenever this message is about a real futures-paper fill
+    (open or close), regardless of which deployment sent it -- see
+    ``send_text``'s docstring. Every other message uses the notifier's own
+    deployment-wide default, so this only returns non-None in that one
+    case."""
+    if signal.category == "futures_exit":
+        return "Futures"
+    if signal.category == "entry" and "futures-paper:" in signal.rationale:
+        return "Futures"
+    return None
+
+
 def _format_signal(signal: Signal) -> str:
     parts = [segment.strip() for segment in signal.rationale.split(";") if segment.strip()]
     if signal.category == "paper_exit":
         return _format_paper_exit(signal, parts)
+    if signal.category == "futures_exit":
+        return _format_futures_exit(signal, parts)
     if signal.category == "exit":
         return _format_exit(signal, parts)
     return _format_entry(signal, parts)
@@ -131,6 +155,26 @@ def _format_exit(signal: Signal, parts: list[str]) -> str:
         lines.append(f"• {_escape(detail)}")
     if pnl_str:
         emoji = "📉" if is_loss else "📈"
+        lines.append(f"{emoji} {pnl_str}")
+    return "\n".join(lines)
+
+
+def _format_futures_exit(signal: Signal, parts: list[str]) -> str:
+    """A real futures-paper position closing -- real margin capital, real
+    P&L. 2026-08-17: this never had a Telegram message at all before (the
+    close note was logged server-side and discarded, see
+    application/signal_pipeline.py's _close_futures_paper) -- only opens
+    were ever visible in Telegram. Mirrors _format_paper_exit's shape."""
+    detail = "; ".join(parts)
+    pnl_str, is_loss = _extract_pnl_percent(detail)
+    header = ("🔴" if is_loss else "🟢") + " <b>FUTURES POSITION CLOSED</b>"
+    lines = [
+        header,
+        f"<b>{_escape(signal.symbol)}</b> @ ₹{signal.price}",
+        f"• {_escape(detail)}",
+    ]
+    if pnl_str:
+        emoji = "❌" if is_loss else "✅"
         lines.append(f"{emoji} {pnl_str}")
     return "\n".join(lines)
 

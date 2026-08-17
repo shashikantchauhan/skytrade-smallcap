@@ -1354,7 +1354,8 @@ async def test_close_futures_paper_noop_when_symbol_not_in_allowlist():
     )
 
     await _close_futures_paper(
-        "RELIANCE.NS", datetime(2026, 2, 5, tzinfo=UTC), Decimal("2950"), account, frozenset(),
+        "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 5, tzinfo=UTC), Decimal("2950"),
+        Decimal("2950"), account, frozenset(), FakeSignalRepository(), FakeNotifier(),
     )
 
     # close_position was never even called -- position stays "open" (no
