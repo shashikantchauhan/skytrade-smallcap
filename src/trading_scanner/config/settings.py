@@ -46,7 +46,7 @@ class AppConfig:
     # here (unlike every other field above) so existing AppConfig(...)
     # call sites -- test fixtures mostly -- don't all need updating just
     # for this; load_config() below still sets it explicitly from env.
-    notification_label: str = "Nifty50"
+    notification_label: str = "Smallcap"
 
 
 def load_config() -> AppConfig:
@@ -62,7 +62,7 @@ def load_config() -> AppConfig:
         turso_auth_token=os.getenv("TRADING_SCANNER_TURSO_AUTH_TOKEN"),
         telegram_bot_token=os.getenv("TRADING_SCANNER_TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=os.getenv("TRADING_SCANNER_TELEGRAM_CHAT_ID"),
-        notification_label=os.getenv("TRADING_SCANNER_NOTIFICATION_LABEL", "Nifty50"),
+        notification_label=os.getenv("TRADING_SCANNER_NOTIFICATION_LABEL", "Smallcap"),
         # NIFTY 50 -- broad NSE benchmark, not tied to any single sector.
         # Evaluated once per run and shown alongside every stock signal so you
         # can judge whether a signal lines up with the broader market or looks
