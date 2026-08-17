@@ -8,6 +8,7 @@ from decimal import Decimal
 import libsql_client
 
 from trading_scanner.domain.models import FuturesPaperPosition
+from trading_scanner.infrastructure.db._shared import add_column_if_missing
 
 _CREATE_FUTURES_PAPER_ACCOUNT_TABLE = """
 CREATE TABLE IF NOT EXISTS futures_paper_account (
@@ -48,6 +49,12 @@ class TursoFuturesPaperAccountRepository:
     async def ensure_schema(self) -> None:
         await self._client.execute(_CREATE_FUTURES_PAPER_ACCOUNT_TABLE)
         await self._client.execute(_CREATE_FUTURES_PAPER_POSITIONS_TABLE)
+        await add_column_if_missing(
+            self._client, "futures_paper_positions", "hedge_entry_price", "REAL"
+        )
+        await add_column_if_missing(
+            self._client, "futures_paper_positions", "hedge_exit_price", "REAL"
+        )
 
     async def get_cash_balance(self) -> Decimal:
         result = await self._client.execute(
@@ -67,8 +74,8 @@ class TursoFuturesPaperAccountRepository:
             """
             INSERT INTO futures_paper_positions
                 (symbol, side, entry_timestamp, futures_entry_price, futures_tradingsymbol,
-                 hedge_tradingsymbol, lot_size, margin_allocated, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')
+                 hedge_tradingsymbol, lot_size, margin_allocated, hedge_entry_price, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
             """,
             [
                 position.symbol,
@@ -79,6 +86,11 @@ class TursoFuturesPaperAccountRepository:
                 position.hedge_tradingsymbol,
                 position.lot_size,
                 float(position.margin_allocated),
+                (
+                    float(position.hedge_entry_price)
+                    if position.hedge_entry_price is not None
+                    else None
+                ),
             ],
         )
         await self._client.execute(
@@ -87,17 +99,29 @@ class TursoFuturesPaperAccountRepository:
         )
 
     async def close_position(
-        self, symbol: str, exit_timestamp: datetime, futures_exit_price: Decimal
+        self,
+        symbol: str,
+        exit_timestamp: datetime,
+        futures_exit_price: Decimal,
+        hedge_exit_price: Decimal | None = None,
     ) -> FuturesPaperPosition | None:
         """Close the most recent open combo for ``symbol``, crediting cash
-        back its margin plus/minus the futures leg's own P&L only -- the
-        hedge option leg's P&L is tracked separately by
-        ``options_shadow.py`` (``purpose="hedge"``), not folded in here.
+        back its margin plus/minus the *combined* futures-leg + hedge-leg
+        P&L.
+
+        2026-08-17: ``pnl_amount`` used to be the futures leg alone -- the
+        hedge option is always bought (long, real premium paid), so its own
+        price move belongs in the real economics too, not just in sizing
+        the margin. ``hedge_exit_price`` is optional (``None`` if the
+        hedge's own quote couldn't be fetched, e.g. illiquid contract) --
+        falls back to futures-only P&L in that case, logged distinctly by
+        the caller, rather than leaving the position stuck open over one
+        bad quote.
         """
         result = await self._client.execute(
             """
             SELECT id, side, entry_timestamp, futures_entry_price, futures_tradingsymbol,
-                   hedge_tradingsymbol, lot_size, margin_allocated
+                   hedge_tradingsymbol, lot_size, margin_allocated, hedge_entry_price
             FROM futures_paper_positions
             WHERE symbol = ? AND status = 'open'
             ORDER BY entry_timestamp DESC LIMIT 1
@@ -108,25 +132,40 @@ class TursoFuturesPaperAccountRepository:
             return None
         (
             position_id, side, entry_timestamp, futures_entry_price, futures_tradingsymbol,
-            hedge_tradingsymbol, lot_size, margin_allocated,
+            hedge_tradingsymbol, lot_size, margin_allocated, hedge_entry_price,
         ) = result.rows[0]
         futures_entry_price = Decimal(str(futures_entry_price))
         margin_allocated = Decimal(str(margin_allocated))
-        pnl_amount = (
+        hedge_entry_price = (
+            Decimal(str(hedge_entry_price)) if hedge_entry_price is not None else None
+        )
+        futures_pnl = (
             (futures_exit_price - futures_entry_price) * lot_size
             if side == "long"
             else (futures_entry_price - futures_exit_price) * lot_size
         )
+        # The hedge option is always bought (long) regardless of the
+        # futures side -- see futures_trading.open_futures_paper_position
+        # -- so its own P&L is simply exit premium minus entry premium,
+        # same convention either way.
+        hedge_pnl = (
+            (hedge_exit_price - hedge_entry_price) * lot_size
+            if hedge_exit_price is not None and hedge_entry_price is not None
+            else Decimal("0")
+        )
+        pnl_amount = futures_pnl + hedge_pnl
         proceeds = margin_allocated + pnl_amount
         await self._client.execute(
             """
             UPDATE futures_paper_positions
-            SET exit_timestamp = ?, futures_exit_price = ?, pnl_amount = ?, status = 'closed'
+            SET exit_timestamp = ?, futures_exit_price = ?, hedge_exit_price = ?,
+                pnl_amount = ?, status = 'closed'
             WHERE id = ?
             """,
             [
-                exit_timestamp.isoformat(), float(futures_exit_price), float(pnl_amount),
-                position_id,
+                exit_timestamp.isoformat(), float(futures_exit_price),
+                float(hedge_exit_price) if hedge_exit_price is not None else None,
+                float(pnl_amount), position_id,
             ],
         )
         await self._client.execute(
@@ -142,6 +181,8 @@ class TursoFuturesPaperAccountRepository:
             hedge_tradingsymbol=hedge_tradingsymbol,
             lot_size=lot_size,
             margin_allocated=margin_allocated,
+            hedge_entry_price=hedge_entry_price,
+            hedge_exit_price=hedge_exit_price,
             exit_timestamp=exit_timestamp,
             futures_exit_price=futures_exit_price,
             pnl_amount=pnl_amount,
@@ -152,7 +193,7 @@ class TursoFuturesPaperAccountRepository:
         result = await self._client.execute(
             """
             SELECT symbol, side, entry_timestamp, futures_entry_price, futures_tradingsymbol,
-                   hedge_tradingsymbol, lot_size, margin_allocated
+                   hedge_tradingsymbol, lot_size, margin_allocated, hedge_entry_price
             FROM futures_paper_positions WHERE status = 'open'
             """
         )
@@ -166,6 +207,7 @@ class TursoFuturesPaperAccountRepository:
                 hedge_tradingsymbol=row[5],
                 lot_size=row[6],
                 margin_allocated=Decimal(str(row[7])),
+                hedge_entry_price=Decimal(str(row[8])) if row[8] is not None else None,
             )
             for row in result.rows
         ]
@@ -175,7 +217,7 @@ class TursoFuturesPaperAccountRepository:
             """
             SELECT symbol, side, entry_timestamp, futures_entry_price, futures_tradingsymbol,
                    hedge_tradingsymbol, lot_size, margin_allocated, exit_timestamp,
-                   futures_exit_price, pnl_amount
+                   futures_exit_price, pnl_amount, hedge_entry_price, hedge_exit_price
             FROM futures_paper_positions
             WHERE status = 'closed'
             ORDER BY exit_timestamp DESC LIMIT ?
@@ -195,6 +237,8 @@ class TursoFuturesPaperAccountRepository:
                 exit_timestamp=datetime.fromisoformat(row[8]) if row[8] else None,
                 futures_exit_price=Decimal(str(row[9])) if row[9] is not None else None,
                 pnl_amount=Decimal(str(row[10])) if row[10] is not None else None,
+                hedge_entry_price=Decimal(str(row[11])) if row[11] is not None else None,
+                hedge_exit_price=Decimal(str(row[12])) if row[12] is not None else None,
                 status="closed",
             )
             for row in result.rows

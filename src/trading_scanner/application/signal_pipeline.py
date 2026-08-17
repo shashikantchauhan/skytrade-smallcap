@@ -113,7 +113,7 @@ _STRATEGY_NAME = "lorentzian"
 # profit (delta near -1/+1) for only a modest extra margin benefit over a
 # further-OTM strike. See try_open_option_position's strike_target_price
 # docstring for the full reasoning.
-_HEDGE_OTM_PCT = Decimal("0.02")
+_HEDGE_OTM_PCT = Decimal("0.05")
 
 # Per-symbol processing is dominated by network I/O (Yahoo Finance downloads),
 # so symbols are processed concurrently rather than one at a time -- cuts a

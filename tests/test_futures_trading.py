@@ -23,21 +23,29 @@ class FakeFuturesPaperAccountRepository:
         self.opened.append(position)
         self._cash_balance -= position.margin_allocated
 
-    async def close_position(self, symbol, exit_timestamp, futures_exit_price):
+    async def close_position(
+        self, symbol, exit_timestamp, futures_exit_price, hedge_exit_price=None
+    ):
         matching = [p for p in self.opened if p.symbol == symbol and p.status == "open"]
         if not matching:
             return None
         position = matching[-1]
-        pnl_amount = (
+        futures_pnl = (
             (futures_exit_price - position.futures_entry_price) * position.lot_size
             if position.side == "long"
             else (position.futures_entry_price - futures_exit_price) * position.lot_size
         )
+        hedge_pnl = (
+            (hedge_exit_price - position.hedge_entry_price) * position.lot_size
+            if hedge_exit_price is not None and position.hedge_entry_price is not None
+            else Decimal("0")
+        )
+        pnl_amount = futures_pnl + hedge_pnl
         self._cash_balance += position.margin_allocated + pnl_amount
         index = self.opened.index(position)
         self.opened[index] = replace(
             position, exit_timestamp=exit_timestamp, futures_exit_price=futures_exit_price,
-            pnl_amount=pnl_amount, status="closed",
+            hedge_exit_price=hedge_exit_price, pnl_amount=pnl_amount, status="closed",
         )
         return self.opened[index]
 
@@ -77,13 +85,19 @@ class FakeDerivativesChain:
         has_future: bool = True,
         has_hedge_option: bool = True,
         futures_ltp: float | None = 2910.0,
+        hedge_ltp: float | None = None,
     ):
         self._combined_margin = combined_margin
         self._has_future = has_future
         self._has_hedge_option = has_hedge_option
         self._futures_ltp = futures_ltp
+        # Defaults to futures_ltp (old behavior: every contract priced the
+        # same) unless a test cares about the two legs moving differently.
+        self._hedge_ltp = hedge_ltp if hedge_ltp is not None else futures_ltp
 
     def ltp(self, exchange_tradingsymbol):
+        if exchange_tradingsymbol.endswith(("PE", "CE")):
+            return self._hedge_ltp
         return self._futures_ltp
 
     def margin_benefit(self, legs):
@@ -144,7 +158,7 @@ async def test_try_open_opens_when_margin_fits_the_slot_budget():
     chain = FakeDerivativesChain(combined_margin=Decimal("15000"))
     position = await futures_trading.try_open_futures_position(
         "RELIANCE.NS", "long", datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
-        "RELIANCE26AUGFUT", "RELIANCE26AUG2800PE", 500, chain, account,
+        "RELIANCE26AUGFUT", "RELIANCE26AUG2800PE", Decimal("50"), 500, chain, account,
     )
     assert position is not None
     assert position.margin_allocated == Decimal("15000") * (
@@ -160,7 +174,7 @@ async def test_try_open_skips_when_margin_exceeds_slot_budget():
     chain = FakeDerivativesChain(combined_margin=Decimal("1000000"))
     position = await futures_trading.try_open_futures_position(
         "RELIANCE.NS", "long", datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
-        "RELIANCE26AUGFUT", "RELIANCE26AUG2800PE", 500, chain, account,
+        "RELIANCE26AUGFUT", "RELIANCE26AUG2800PE", Decimal("50"), 500, chain, account,
     )
     assert position is None
     assert account.opened == []
@@ -172,7 +186,7 @@ async def test_try_open_skips_when_margin_api_fails():
     chain = FakeDerivativesChain(combined_margin=None)
     position = await futures_trading.try_open_futures_position(
         "RELIANCE.NS", "long", datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
-        "RELIANCE26AUGFUT", "RELIANCE26AUG2800PE", 500, chain, account,
+        "RELIANCE26AUGFUT", "RELIANCE26AUG2800PE", Decimal("50"), 500, chain, account,
     )
     assert position is None
 
@@ -183,12 +197,12 @@ async def test_try_open_skips_a_symbol_already_open():
     chain = FakeDerivativesChain(combined_margin=Decimal("10000"))
     first = await futures_trading.try_open_futures_position(
         "RELIANCE.NS", "long", datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
-        "RELIANCE26AUGFUT", "RELIANCE26AUG2800PE", 500, chain, account,
+        "RELIANCE26AUGFUT", "RELIANCE26AUG2800PE", Decimal("50"), 500, chain, account,
     )
     assert first is not None
     second = await futures_trading.try_open_futures_position(
         "RELIANCE.NS", "short", datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
-        "RELIANCE26AUGFUT", "RELIANCE26AUG3000CE", 500, chain, account,
+        "RELIANCE26AUGFUT", "RELIANCE26AUG3000CE", Decimal("50"), 500, chain, account,
     )
     assert second is None
 
@@ -293,24 +307,34 @@ async def test_close_futures_paper_position_closes_the_open_combo():
     # Entry and exit use SEPARATE chain instances with different live LTPs
     # -- the futures leg's own price, not the equity market_price passed
     # to open_futures_paper_position (which is only used for the hedge
-    # strike target -- see that function's docstring).
+    # strike target -- see that function's docstring). Hedge leg also
+    # moves (decays from 50 to 45, a realistic OTM-option-losing-value
+    # scenario) -- 2026-08-17: pnl_amount is the real *combined* P&L now,
+    # not the futures leg alone (see FuturesPaperPosition's docstring).
     trades = [_closed_trade("RELIANCE.NS", SignalSide.BUY, win=True) for _ in range(5)]
     repo = FakeTradeRepository(trades)
     account = FakeFuturesPaperAccountRepository()
-    entry_chain = FakeDerivativesChain(combined_margin=Decimal("10000"), futures_ltp=2900.0)
+    entry_chain = FakeDerivativesChain(
+        combined_margin=Decimal("10000"), futures_ltp=2900.0, hedge_ltp=50.0
+    )
     await futures_trading.open_futures_paper_position(
         "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
         "60minute", entry_chain, repo, account,
     )
 
-    exit_chain = FakeDerivativesChain(combined_margin=Decimal("10000"), futures_ltp=2950.0)
+    exit_chain = FakeDerivativesChain(
+        combined_margin=Decimal("10000"), futures_ltp=2950.0, hedge_ltp=45.0
+    )
     note = await futures_trading.close_futures_paper_position(
         "RELIANCE.NS", datetime(2026, 2, 5, tzinfo=UTC), exit_chain, account,
     )
 
     assert note is not None
     assert account.opened[0].status == "closed"
-    assert account.opened[0].pnl_amount == (Decimal("2950") - Decimal("2900")) * 500
+    futures_pnl = (Decimal("2950") - Decimal("2900")) * 500
+    # the hedge lost value -- real cost, now counted:
+    hedge_pnl = (Decimal("45") - Decimal("50")) * 500
+    assert account.opened[0].pnl_amount == futures_pnl + hedge_pnl
 
 
 @pytest.mark.asyncio

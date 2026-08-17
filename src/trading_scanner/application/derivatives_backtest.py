@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # targets a strike this far OTM instead of ATM, so it doesn't cancel out
 # most of the primary position's profit (see that constant's docstring for
 # the full reasoning, confirmed against Kite's own margin-benefit numbers).
-_HEDGE_OTM_PCT = Decimal("0.02")
+_HEDGE_OTM_PCT = Decimal("0.05")
 
 
 async def run_current_month_backtest(

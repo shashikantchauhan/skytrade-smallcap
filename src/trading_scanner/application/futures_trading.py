@@ -33,6 +33,7 @@ unchanged from when this module was first built.
 """
 
 import asyncio
+import logging
 import os
 from datetime import datetime
 from decimal import Decimal
@@ -86,6 +87,7 @@ async def try_open_futures_position(
     futures_entry_price: Decimal,
     futures_tradingsymbol: str,
     hedge_tradingsymbol: str,
+    hedge_entry_price: Decimal,
     lot_size: int,
     derivatives_chain: KiteDerivativesChain,
     futures_account_repository: FuturesPaperAccountRepository,
@@ -140,6 +142,7 @@ async def try_open_futures_position(
         hedge_tradingsymbol=hedge_tradingsymbol,
         lot_size=lot_size,
         margin_allocated=required_margin,
+        hedge_entry_price=hedge_entry_price,
     )
     await futures_account_repository.open_position(position)
     return position
@@ -149,8 +152,10 @@ async def try_open_futures_position(
 # derivatives_backtest.py's copy -- duplicated rather than imported to avoid
 # a circular import (signal_pipeline.py is the one calling into this
 # module, not the other way around); see either of those two for the full
-# reasoning on why 2% instead of ATM.
-_HEDGE_OTM_PCT = Decimal("0.02")
+# reasoning on why OTM instead of ATM. 5% (2026-08-17, was 2%): user
+# preference for a wider/cheaper hedge, less downside protection but a
+# smaller premium drag on the combo's real P&L.
+_HEDGE_OTM_PCT = Decimal("0.05")
 
 
 async def open_futures_paper_position(
@@ -214,6 +219,13 @@ async def open_futures_paper_position(
     )
     if hedge_contract is None:
         return None
+    # 2026-08-17: required, not best-effort -- the hedge's own entry
+    # premium has to be known now to ever compute a real combined P&L at
+    # close (see close_futures_paper_position). Opening a combo we can't
+    # later account for properly isn't better than not opening it.
+    hedge_ltp = derivatives_chain.ltp(f"NFO:{hedge_contract['tradingsymbol']}")
+    if hedge_ltp is None:
+        return None
     position = await try_open_futures_position(
         symbol,
         futures_side,
@@ -221,6 +233,7 @@ async def open_futures_paper_position(
         futures_entry_price,
         futures_contract["tradingsymbol"],
         hedge_contract["tradingsymbol"],
+        Decimal(str(hedge_ltp)),
         int(futures_contract["lot_size"]),
         derivatives_chain,
         futures_account_repository,
@@ -252,6 +265,14 @@ async def close_futures_paper_position(
     user noticing futures P&L wasn't tracking the underlying's real move --
     which is exactly correct behavior once this used the real futures
     price; it just wasn't, until this fix).
+
+    2026-08-17: also fetches the hedge option's own exit LTP so the
+    reported P&L is the real combo's (futures leg + hedge leg), not just
+    the futures leg alone -- see ``TursoFuturesPaperAccountRepository.
+    close_position``. Best-effort on the hedge quote specifically (an
+    illiquid far/near-OTM option can have no live quote at exit): falls
+    back to futures-only P&L rather than leaving the position stuck open
+    over one bad quote, but still closes for real either way.
     """
     contract = derivatives_chain.nearest_future(symbol)
     if contract is None:
@@ -259,8 +280,19 @@ async def close_futures_paper_position(
     futures_ltp = derivatives_chain.ltp(f"NFO:{contract['tradingsymbol']}")
     if futures_ltp is None:
         return None
+    open_positions = await futures_account_repository.get_open_positions()
+    open_position = next((p for p in open_positions if p.symbol == symbol), None)
+    if open_position is None:
+        return None
+    hedge_ltp = derivatives_chain.ltp(f"NFO:{open_position.hedge_tradingsymbol}")
+    if hedge_ltp is None:
+        logging.getLogger(__name__).warning(
+            "No live quote for hedge leg %s closing %s -- P&L will be futures-only.",
+            open_position.hedge_tradingsymbol, symbol,
+        )
     position = await futures_account_repository.close_position(
-        symbol, exit_timestamp, Decimal(str(futures_ltp))
+        symbol, exit_timestamp, Decimal(str(futures_ltp)),
+        hedge_exit_price=Decimal(str(hedge_ltp)) if hedge_ltp is not None else None,
     )
     if position is None:
         return None

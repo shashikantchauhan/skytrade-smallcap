@@ -133,6 +133,14 @@ class FuturesPaperPosition:
     hedge_tradingsymbol: str
     lot_size: int
     margin_allocated: Decimal
+    # 2026-08-17: the hedge option's own entry/exit premium -- it's always
+    # bought (long), paying real premium, so its own price move is part of
+    # the combo's real economics, not just a margin-sizing input. Before
+    # this, pnl_amount only ever reflected the futures leg alone, while the
+    # combo was *sized* (margin) as if the hedge mattered -- inconsistent,
+    # and understated the real cost/benefit of the hedge.
+    hedge_entry_price: Decimal | None = None
+    hedge_exit_price: Decimal | None = None
     exit_timestamp: datetime | None = None
     futures_exit_price: Decimal | None = None
     pnl_amount: Decimal | None = None
