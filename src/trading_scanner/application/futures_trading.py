@@ -240,9 +240,18 @@ async def open_futures_paper_position(
     )
     if position is None:
         return None
+    # 2026-08-17: the hedge leg's own tradingsymbol/entry premium wasn't
+    # shown here before -- only the futures leg was, even though a real
+    # hedge position was genuinely opened alongside it (real premium
+    # spent). Both legs now shown explicitly. " | " not "; " as the
+    # internal separator -- this whole string is one segment of a Signal.
+    # rationale that itself gets split on ";" (see infrastructure/
+    # telegram.py's _format_entry), so a "; " here would fracture this
+    # note across multiple bullets instead of staying one coherent line.
     return (
         f"futures-paper: opened {futures_side} {futures_contract['tradingsymbol']} "
-        f"margin=₹{position.margin_allocated:.0f}"
+        f"@ ₹{futures_entry_price} | hedge: bought {hedge_contract['tradingsymbol']} "
+        f"@ ₹{hedge_ltp} | margin=₹{position.margin_allocated:.0f}"
     )
 
 
@@ -297,7 +306,15 @@ async def close_futures_paper_position(
     if position is None:
         return None
     pnl_percent = position.pnl_amount / position.margin_allocated * 100
+    # " | " internally, same reasoning as open_futures_paper_position's note.
+    hedge_note = (
+        f" | hedge: {position.hedge_tradingsymbol} @ ₹{position.hedge_exit_price} "
+        f"(entry ₹{position.hedge_entry_price})"
+        if position.hedge_exit_price is not None
+        else f" | hedge: {position.hedge_tradingsymbol} (no live quote at close, futures-only P&L)"
+    )
     return (
         f"futures-paper: closed {position.side} {position.futures_tradingsymbol} "
+        f"@ ₹{position.futures_exit_price}{hedge_note} | "
         f"pnl=₹{position.pnl_amount:.0f} ({pnl_percent:.2f}%)"
     )
