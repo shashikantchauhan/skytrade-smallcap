@@ -1037,6 +1037,16 @@ async def _collect_and_open_ranked_positions(
             if await futures_trading.is_eligible(
                 symbol, side, config.candle_interval, trade_repository
             ):
+                # 2026-08-17: was missing here (only ever passed on the cash
+                # side above) -- meant every futures candidate scored at the
+                # flat median-50 fallback in score_candidate, ignoring
+                # _EXPECTANCY_WEIGHT (1.5, the highest weight in the
+                # formula and the only factor with real walk-forward
+                # support -- see ranking.py). Scarce futures slots were
+                # competing on volatility/regime/ADX/prediction alone.
+                expectancy = await symbol_expectancy(
+                    symbol, side, config.candle_interval, trade_repository
+                )
                 futures_candidates.append((
                     symbol,
                     RankedCandidate(
@@ -1048,6 +1058,7 @@ async def _collect_and_open_ranked_positions(
                         regime_normalized=result.regime_normalized,
                         volatility_margin=result.volatility_margin,
                         direction=side,
+                        expectancy=expectancy,
                     ),
                 ))
             else:
