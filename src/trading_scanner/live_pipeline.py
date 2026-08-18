@@ -43,6 +43,7 @@ from trading_scanner.application.signal_pipeline import (
     _close_paper_position,
     _collect_and_open_ranked_positions,
     _evaluate_from_stored_candles,
+    _notify_kite_expired_once_per_day,
     _process_symbol,
 )
 from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
@@ -96,6 +97,24 @@ _MAX_CONCURRENT_SYMBOLS = 12
 # staleness is harmless; querying on every tick would not be.
 _POSITIONS_CACHE_REFRESH_SECONDS = 5
 
+# 2026-08-17: found by hand after a real 4+ hour outage on the parent
+# deployment -- a stale daily token made KiteTicker fail its own reconnect
+# loop with repeated 403s, exhaust its retries ("supervisor will recreate
+# it" -- nothing actually does), and then _token_refresh_loop's in-place
+# disconnect+reconnect *also* silently failed to restore any tick flow
+# (logged "reconnecting", delivered zero ticks or callbacks of any kind
+# for 2.5+ hours after). Only a full process restart (a fresh KiteTicker
+# from run_forever's own cold-start path) actually recovered. This
+# watchdog is the guaranteed fallback for exactly that: regardless of
+# *why* the ticker went dead, if no tick or (re)connect has landed in
+# this long during market hours, raise out of the gather in run_forever
+# so its outer while loop tears down and reconnects from scratch -- the
+# one path proven to work, without needing an actual systemd/process
+# restart. Ported here 2026-08-18 alongside the same outage's other fix
+# (_run_until_first_exit below).
+_TICKER_STALE_SECONDS = 600
+_TICKER_WATCHDOG_CHECK_SECONDS = 60
+
 
 def _build_notifier(config: AppConfig):
     if config.telegram_bot_token and config.telegram_chat_id:
@@ -142,6 +161,9 @@ class LiveTickerPipeline:
         # Set for real in _setup_repositories (needs the config's symbols
         # file loaded) -- empty here just means "not set up yet."
         self._futures_paper_symbols: frozenset[str] = frozenset()
+        # Last time a tick arrived or the ticker (re)connected -- see
+        # _ticker_watchdog_loop and _TICKER_STALE_SECONDS above.
+        self._last_tick_at: datetime = datetime.now(UTC)
 
     async def _setup_repositories(self) -> None:
         if not self._config.turso_database_url:
@@ -201,9 +223,14 @@ class LiveTickerPipeline:
         return token_row[0] if token_row else None
 
     def _on_ticks(self, ws, ticks) -> None:  # noqa: ANN001 -- kiteconnect's own callback signature
+        self._last_tick_at = datetime.now(UTC)
         self._tick_queue.put(ticks)
 
     def _on_connect(self, ws, response) -> None:  # noqa: ANN001
+        # Reset the watchdog clock here too, not just on ticks -- a fresh
+        # connect can legitimately take a few seconds before the first tick
+        # lands, and this must not look stale in that gap.
+        self._last_tick_at = datetime.now(UTC)
         tokens = list(self._token_to_symbol.keys())
         logger.info("KiteTicker connected -- subscribing to %d instruments.", len(tokens))
         ws.subscribe(tokens)
@@ -492,6 +519,42 @@ class LiveTickerPipeline:
                 self._disconnect_ticker()
                 self._connect_ticker(token)
 
+    async def _ticker_watchdog_loop(self) -> None:
+        """Guaranteed fallback if the ticker goes dead and stays dead --
+        see _TICKER_STALE_SECONDS above for the 2026-08-17 incident this
+        exists for. Deliberately doesn't try to fix the ticker itself
+        (_connect_ticker/_disconnect_ticker's in-place hot-swap is exactly
+        what failed silently that day); it just raises, which propagates
+        out of run_forever's gather and into _run()'s own try/except,
+        which already does the one thing proven to work: tear this
+        pipeline instance down and call run_forever() again from scratch,
+        including a brand new KiteTicker.
+
+        Also fixes a second gap from the same incident: this run never got
+        a Telegram alert that the Kite session needed attention, because
+        _notify_kite_expired_once_per_day was only ever wired into the old
+        download-based run_signal_pipeline() path, not this always-on one
+        -- so staleness here was invisible except in the server's own log.
+        Reused directly (same once-per-calendar-day dedup via
+        kite_session_repository.expiry_notified_date) rather than
+        reinventing it."""
+        while True:
+            await asyncio.sleep(_TICKER_WATCHDOG_CHECK_SECONDS)
+            if not is_market_hours(datetime.now(UTC)):
+                continue
+            stale_for = (datetime.now(UTC) - self._last_tick_at).total_seconds()
+            if stale_for > _TICKER_STALE_SECONDS:
+                try:
+                    await _notify_kite_expired_once_per_day(
+                        self._repos["kite_session"], self._notifier
+                    )
+                except Exception:
+                    logger.exception("Failed to send ticker-stale notification")
+                raise RuntimeError(
+                    f"KiteTicker appears dead: no tick or (re)connect in "
+                    f"{stale_for:.0f}s during market hours -- forcing a full reconnect."
+                )
+
     async def run_forever(self) -> None:
         await self._setup_repositories()
         try:
@@ -542,14 +605,20 @@ class LiveTickerPipeline:
 
                 self._connect_ticker(access_token)
                 self._current_bucket = None
+                # Reset here too (not just in _on_connect) so a freshly
+                # entered loop iteration always gets the watchdog's full
+                # _TICKER_STALE_SECONDS grace period, even if _on_connect's
+                # own callback is delayed or never fires at all.
+                self._last_tick_at = datetime.now(UTC)
                 try:
-                    await asyncio.gather(
+                    await _run_until_first_exit((
                         self._drain_ticks_loop(),
                         self._boundary_loop(),
                         self._token_refresh_loop(),
                         self._refresh_positions_cache_loop(),
+                        self._ticker_watchdog_loop(),
                         self._run_until_market_close(),
-                    )
+                    ))
                 finally:
                     self._disconnect_ticker()
         finally:
@@ -570,11 +639,58 @@ class _MarketClosed(Exception):
     session's loops and let run_forever's outer loop take over."""
 
 
+async def _run_until_first_exit(coros) -> None:
+    """Run several long-running loops concurrently; the moment ANY one of
+    them returns or raises, cancel the rest and propagate that one's
+    outcome (raising if it raised).
+
+    2026-08-18: replaces a plain ``asyncio.gather(*coros)`` here, found on
+    the parent deployment to be responsible for a real ~2 hour silent
+    outage. ``gather()`` without ``return_exceptions=True`` propagates the
+    FIRST exception to its caller the moment one coroutine raises -- but
+    it does NOT cancel the other still-running coroutines; they keep
+    executing as orphaned background tasks the caller no longer has any
+    reference to or control over. Every one of ``run_forever``'s crash-
+    and-retry cycles was therefore leaking its previous cycle's other
+    loops (ticker drain, boundary, token refresh, positions-cache
+    refresh, watchdog) instead of tearing them down -- confirmed live on
+    the parent: after 5 crashes in ~40 minutes, the process had
+    accumulated that many orphaned copies of each loop, all mutating the
+    same ``self`` (ticker, caches, DB client/repos) concurrently and
+    unpredictably, which is what actually produced the frozen-but-not-
+    crashed state systemd saw as healthy (near-zero CPU, sockets stuck in
+    CLOSE-WAIT) -- including the watchdog itself being one of the leaked,
+    no-longer-effective copies.
+    """
+    tasks = [asyncio.ensure_future(coro) for coro in coros]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    # Surface the first-finished task's outcome -- if it raised, re-raise
+    # here so run_forever's own try/finally (ticker disconnect) and _run's
+    # except clauses see the same exception they always have.
+    (first,) = done
+    first.result()
+
+
 async def _run(config: AppConfig) -> None:
     symbols = SymbolLoader().load(config.symbols_file)
     logger.info("Loaded %d symbols for live ticker pipeline", len(symbols))
-    pipeline = LiveTickerPipeline(config, symbols)
     while True:
+        # A fresh LiveTickerPipeline every cycle, not one reused instance
+        # -- belt-and-suspenders alongside _run_until_first_exit above:
+        # even if some future loop leaks a task, it can no longer share
+        # mutable state (ticker, caches, DB client) with the new cycle's
+        # instance.
+        pipeline = LiveTickerPipeline(config, symbols)
         try:
             await pipeline.run_forever()
         except _MarketClosed:
